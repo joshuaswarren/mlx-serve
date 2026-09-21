@@ -3790,18 +3790,31 @@ pub fn narrowsLoadedF16(key: []const u8, ndim: usize, dtype: mlx.mlx_dtype) bool
 /// dtype normalization is invisible once the model is up, so a one-boot A/B
 /// switch is the only way to attribute a future f16-checkpoint regression to
 /// it. The side-tensor arm predates this and is not switchable.
+///
+/// Pure decision core of `narrow1dEnabled`, split out so the platform/env
+/// matrix is unit-testable without mutating process-global state: unset env
+/// follows the platform (Metal narrows — bf16 is the wired-format win there;
+/// other backends keep f16), and any explicit value overrides, with "0" as
+/// the kill switch and every other value (documented parser: `!= "0"`) as on.
+fn narrow1dDecision(raw: ?[*:0]const u8, darwin: bool) bool {
+    const value = raw orelse return darwin;
+    return !std.mem.eql(u8, std.mem.sliceTo(value, 0), "0");
+}
+
 var narrow_1d_env: ?bool = null;
 fn narrow1dEnabled() bool {
     if (narrow_1d_env) |v| return v;
-    const on = blk: {
-        const raw = std.c.getenv("MLX_SERVE_F16_NARROW_1D") orelse
-            break :blk builtin.os.tag.isDarwin();
-        // Default ON for Metal (bf16 is the wired-format win there). The
-        // Omarchy Vulkan backend has no bf16 GPU kernel ("No GPU kernel
-        // exists for it"), so off Darwin the default is OFF unless the env
-        // explicitly forces it.
-        break :blk !std.mem.eql(u8, std.mem.sliceTo(raw, 0), "0");
-    };
+    const raw = std.c.getenv("MLX_SERVE_F16_NARROW_1D");
+    const on = narrow1dDecision(raw, builtin.os.tag.isDarwin());
+    // Guard for the saved-env restoration class: an explicit =1 on a
+    // non-Metal backend forces a configuration the Omarchy Vulkan kernels
+    // cannot run (hard-throw "No GPU kernel exists" at eval, e.g. bf16 op
+    // at [1,33,4864]). The A/B override stays honored — it is the
+    // attribution tool — but the boot names the flag so the failure is
+    // attributable in one look instead of an opaque backend throw.
+    if (on and !builtin.os.tag.isDarwin() and raw != null) {
+        log.warn("[dtype] MLX_SERVE_F16_NARROW_1D explicitly forces 1-D f16->bf16 narrowing on a non-Metal backend; the Omarchy Vulkan path has no bf16 kernel for several fused ops (dtype=bfloat16 shape=[1,33,4864] hard-throws 'No GPU kernel exists'). Honored as an A/B override — set MLX_SERVE_F16_NARROW_1D=0 (or unset) to keep f16 tables.\n", .{});
+    }
     narrow_1d_env = on;
     return on;
 }
@@ -6639,6 +6652,27 @@ test "narrowsLoadedF16 catches per-channel tables, not matmul operands" {
     try testing.expect(!narrowsLoadedF16("model.layers.0.input_layernorm.weight", 1, .bfloat16));
     try testing.expect(!narrowsLoadedF16("model.layers.0.mlp.down_proj.weight", 2, .uint32));
     try testing.expect(!narrowsLoadedF16("model.layers.0.mlp.down_proj.scales", 2, .bfloat16));
+}
+
+test "narrow1dDecision: platform default, kill switch, explicit force" {
+    // Unset env: Metal (Darwin) narrows — bf16 is the wired-format win
+    // there. Every other backend keeps f16, because the Omarchy Vulkan
+    // path has no bf16 kernel for several fused ops and the backend
+    // hard-throws rather than falling back.
+    try testing.expect(narrow1dDecision(null, true));
+    try testing.expect(!narrow1dDecision(null, false));
+
+    // The kill switch wins over the platform default on both platforms.
+    try testing.expect(!narrow1dDecision("0", true));
+    try testing.expect(!narrow1dDecision("0", false));
+
+    // An explicit non-"0" value forces the narrowing on anywhere — this is
+    // the A/B override (and the shape the saved-env restoration hit on
+    // jw16, throwing 'No GPU kernel exists' at a bf16 op). The parser is
+    // documented as `!= "0"`, so non-numeric values parse as on too.
+    try testing.expect(narrow1dDecision("1", false));
+    try testing.expect(narrow1dDecision("1", true));
+    try testing.expect(narrow1dDecision("junk", false));
 }
 
 test "parseGenerationDefaultsFromJson: reads model sampling recommendations" {
