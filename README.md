@@ -243,3 +243,7 @@ mlx-serve bundles third-party code that stays under its own license, including s
 ---
 
 ★ **Found this useful? [Star the repo](https://github.com/ddalcu/mlx-serve/), [subscribe on YouTube](https://www.youtube.com/@DavidDalcu), [follow on X](https://x.com/ddalcu). It really does help others discover it.**
+
+## Contributors
+
+Everyone credited so far: [CONTRIBUTORS.md](CONTRIBUTORS.md).
